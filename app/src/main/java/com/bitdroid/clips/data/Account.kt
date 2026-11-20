@@ -53,9 +53,15 @@ object Account {
 
     fun cookies(): String? = prefs().getString("cookies", null)?.takeIf { it.contains("SAPISID=") }
 
+    /** Changes every time you sign in or out; clip feeds loaded under the old state start over. */
+    var session by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+
     fun saveCookies(c: String) {
         prefs().edit().putString("cookies", c).apply()
+        reelToken = null
         signedIn = true
+        session++
     }
 
     fun signOut() {
@@ -65,6 +71,8 @@ object Account {
             CookieManager.getInstance().flush()
         }
         signedIn = false
+        reelToken = null
+        session++
         name = null
         handle = null
         photo = null
@@ -259,6 +267,16 @@ object Account {
     }
 
     fun resetShorts() { reelToken = null }
+
+    /** Search YouTube as you, keeping only Shorts. */
+    suspend fun searchShorts(query: String): Paged = io { shortsPage(call("search", JSONObject().put("query", query))) }
+
+    private fun shortsPage(r: JSONObject): Paged {
+        val clips = (parseShorts(r) + parseVideos(r).filter { it.duration in 1..180 }.map { it.copy(short = true) }).distinctBy { it.id }
+        val token = continuation(r)
+        val loader: (suspend (Page) -> Paged)? = if (token == null) null else { p -> io { shortsPage(call("search", JSONObject().put("continuation", p.url))) } }
+        return Paged(clips.map { Entry.Video(it) }, token?.let { Page(it) }, loader)
+    }
 
     /** Shorts from channels you're subscribed to (the Shorts shelf on your subscriptions page). */
     suspend fun subscriptionShorts(): List<VideoRef> = io {

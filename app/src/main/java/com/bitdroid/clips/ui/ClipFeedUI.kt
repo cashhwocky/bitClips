@@ -99,8 +99,12 @@ import kotlin.random.Random
 fun bottomRoom(): Dp = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 96.dp
 
 /** A swipeable list of clips that keeps its place and loads more as you go. */
-class ClipList(private val loader: (suspend () -> List<VideoRef>)?) {
+class ClipList(private val loader: (suspend () -> List<VideoRef>)?, private val personal: Boolean = false) {
     val items = mutableStateListOf<VideoRef>()
+    /** Which sign-in session these clips were loaded under. */
+    private var loadedSession = -1
+    /** Loaded before you signed in (or under another account): start over so it's your feed. */
+    val stale: Boolean get() = personal && items.isNotEmpty() && loadedSession != com.bitdroid.clips.data.Account.session
     var page = 0
     var loading by mutableStateOf(false)
         private set
@@ -113,6 +117,7 @@ class ClipList(private val loader: (suspend () -> List<VideoRef>)?) {
         loading = true
         error = null
         try {
+            if (items.isEmpty()) loadedSession = com.bitdroid.clips.data.Account.session
             val seen = items.map { it.id }.toHashSet()
             items.addAll(load().filter { it.id !in seen })
         } catch (e: Exception) {
@@ -127,13 +132,14 @@ class ClipList(private val loader: (suspend () -> List<VideoRef>)?) {
         ClipPlayback.clear()
         items.clear()
         page = 0
+        if (personal) Repo.resetClips()
         more()
     }
 }
 
 object Feeds {
-    val forYou = ClipList { Repo.clips() }
-    val following = ClipList { Repo.followingClips() }
+    val forYou = ClipList({ Repo.clips() }, personal = true)
+    val following = ClipList({ Repo.followingClips() }, personal = true)
     var viewer by mutableStateOf<ClipList?>(null)
         private set
 
@@ -156,7 +162,9 @@ object Feeds {
 
     /** Buffer the first For You clips in the background so the app opens straight into a playing clip. */
     suspend fun warmUp() {
-        if (forYou.items.isEmpty()) forYou.more()
+        // Only warm up as you: never load a signed-out feed that you'd then have to refresh away.
+        if (!com.bitdroid.clips.data.Account.signedIn) return
+        if (forYou.stale) forYou.fresh() else if (forYou.items.isEmpty()) forYou.more()
         forYou.items.getOrNull(0)?.let(ClipPlayback::preload)
         forYou.items.getOrNull(1)?.let(ClipPlayback::preload)
     }
@@ -179,7 +187,7 @@ object CommentCache {
 @Composable
 fun ClipPager(list: ClipList, modifier: Modifier = Modifier, topInset: Dp = 0.dp) {
     val scope = rememberCoroutineScope()
-    LaunchedEffect(list) { if (list.items.isEmpty()) list.more() }
+    LaunchedEffect(list, com.bitdroid.clips.data.Account.session) { if (list.stale) list.fresh() else if (list.items.isEmpty()) list.more() }
     DisposableEffect(list) { onDispose { ClipPlayback.pause() } }
     Box(modifier.fillMaxSize().background(Color.Black)) {
         val items = list.items

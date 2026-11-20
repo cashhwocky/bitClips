@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { Updater.checkOnLaunch(this@MainActivity)?.let { notifyUpdate(it.versionName) } }
         if (Account.signedIn) lifecycleScope.launch { Account.refreshProfile() }
         // Start buffering the first For You clips right away so the feed opens playing.
-        lifecycleScope.launch { runCatching { Feeds.warmUp() } }
+        lifecycleScope.launch { if (!Setup.needed) runCatching { Feeds.warmUp() } }
 
         setContent {
             BitTheme {

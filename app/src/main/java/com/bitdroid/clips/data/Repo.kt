@@ -198,10 +198,28 @@ object Repo {
     // ------------------------------------------------------------ bitClips extras
 
     /** Shorts matching a search. */
-    suspend fun searchClips(query: String): Paged = io {
-        val handler = yt.searchQHFactory.fromQuery("$query #shorts", listOf("videos"), "")
-        val info = SearchInfo.getInfo(yt, handler)
-        Paged(info.relatedItems.shortsOnly(), info.nextPage, searchClipsMore(handler))
+    suspend fun searchClips(query: String): Paged {
+        val q = if (query.contains("shorts", true)) query else "$query #shorts"
+        val errors = mutableListOf<String>()
+        // 1) As you, through YouTube's own search (best results, and it knows Shorts).
+        if (Account.signedIn) {
+            runCatching { Account.searchShorts(q) }.onSuccess { if (it.items.isNotEmpty()) return it }
+                .onFailure { errors += "YouTube: ${it.javaClass.simpleName}: ${it.message}" }
+        }
+        // 2) NewPipe, videos only, then 3) NewPipe with no filter.
+        for (filters in listOf(listOf("videos"), emptyList())) {
+            val r = runCatching {
+                io {
+                    val handler = yt.searchQHFactory.fromQuery(q, filters, "")
+                    val info = SearchInfo.getInfo(yt, handler)
+                    Paged(info.relatedItems.shortsOnly(), info.nextPage, searchClipsMore(handler))
+                }
+            }
+            r.onSuccess { if (it.items.isNotEmpty()) return it }
+                .onFailure { errors += "NewPipe${if (filters.isEmpty()) "" else " (videos)"}: ${it.javaClass.simpleName}: ${it.message}" }
+        }
+        if (errors.isNotEmpty()) throw java.io.IOException(errors.joinToString("\n"))
+        return Paged(emptyList(), null, null)
     }
 
     private fun searchClipsMore(handler: org.schabi.newpipe.extractor.linkhandler.SearchQueryHandler): suspend (Page) -> Paged = { page ->
@@ -306,9 +324,15 @@ object Repo {
     suspend fun clips(): List<VideoRef> = coroutineScope {
         val round = clipRound++
         if (Account.signedIn) {
-            // Signed in: your own Shorts feed from YouTube.
-            val mine = runCatching { Account.shorts() }.getOrDefault(emptyList())
-            if (mine.size >= 3) return@coroutineScope mine
+            // Signed in: only ever your own Shorts. Try the personal sequence (twice), then the Shorts
+            // from your subscriptions; never fall back to random popular ones.
+            repeat(2) {
+                val mine = runCatching { Account.shorts() }.getOrDefault(emptyList())
+                if (mine.isNotEmpty()) return@coroutineScope mine
+                Account.resetShorts()
+            }
+            val subs = runCatching { Account.subscriptionShorts() }.getOrDefault(emptyList())
+            if (subs.isNotEmpty()) return@coroutineScope subs.shuffled()
         }
         if (round == 0) {
             // First batch: one quick search so the first clip appears right away.
