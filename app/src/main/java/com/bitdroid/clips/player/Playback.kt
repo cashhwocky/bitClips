@@ -27,7 +27,17 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.schabi.newpipe.extractor.stream.StreamInfo
 
+/**
+ * Small, quick buffers: start after half a second of video and keep ~25 s ahead. Several clips are
+ * preloaded at once, so huge buffers on each would fight the one you're watching for bandwidth.
+ */
+private fun clipLoadControl() = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+    .setBufferDurationsMs(12_000, 25_000, 500, 1_500)
+    .setPrioritizeTimeOverSizeThresholds(true)
+    .build()
+
 private fun newPlayer(context: Context): ExoPlayer = ExoPlayer.Builder(context)
+    .setLoadControl(clipLoadControl())
     .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
     .setHandleAudioBecomingNoisy(true)
     .setWakeMode(C.WAKE_MODE_NETWORK)
@@ -61,6 +71,11 @@ object ClipPlayback {
         var playing by mutableStateOf(false)
         var job: Job? = null
         var counted = false
+        /** Quality cap this clip loaded at, and the quality it actually plays. */
+        var cap = 1080
+        var quality by mutableIntStateOf(0)
+        var stallJob: Job? = null
+        var watchdog: Player.Listener? = null
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
             override fun onVideoSizeChanged(size: VideoSize) {
@@ -91,6 +106,22 @@ object ClipPlayback {
         val player = spare.removeFirstOrNull() ?: newPlayer(app)
         val slot = Slot(v.id, player)
         player.addListener(slot.listener)
+        slot.watchdog = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                slot.stallJob?.cancel()
+                // Stuck buffering in the middle of a clip: step down a quality and carry on from the same spot.
+                if (state == Player.STATE_BUFFERING && player.playWhenReady && player.currentPosition > 0) {
+                    slot.stallJob = scope.launch {
+                        kotlinx.coroutines.delay(4000)
+                        if (player.playbackState == Player.STATE_BUFFERING) stepDown(slot)
+                    }
+                }
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                // Usually an expired or refused stream URL: fetch fresh links once and resume.
+                scope.launch { recover(slot) }
+            }
+        }.also { player.addListener(it) }
         player.repeatMode = if (Prefs.loopClips) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         player.volume = 1f
         player.playWhenReady = false
@@ -100,7 +131,9 @@ object ClipPlayback {
                 val i = Repo.stream(v.url)
                 slot.info = i
                 // 720p is plenty for a phone-sized clip and starts fast.
-                val (src, _) = Sources.build(i, 720)
+                slot.cap = startCap()
+                val (src, h) = Sources.build(i, slot.cap)
+                slot.quality = h
                 player.setMediaSource(src)
                 player.prepare()
                 if (activeId == v.id) player.play()
@@ -139,10 +172,52 @@ object ClipPlayback {
         }
     }
 
+    /** Best quality to start at: 1080p on Wi-Fi, 720p on mobile data. */
+    private fun startCap(): Int {
+        val cm = app.getSystemService(android.net.ConnectivityManager::class.java)
+        return if (cm?.isActiveNetworkMetered == true) 720 else 1080
+    }
+
+    private fun stepDown(slot: Slot) {
+        val i = slot.info ?: return
+        val lower = Sources.qualities(i).filter { it < slot.quality }.maxOrNull() ?: return
+        slot.cap = lower
+        val p = slot.player
+        val pos = p.currentPosition
+        runCatching {
+            val (src, h) = Sources.build(i, lower)
+            slot.quality = h
+            p.setMediaSource(src, pos)
+            p.prepare()
+        }
+    }
+
+    private val recovering = mutableSetOf<String>()
+
+    private suspend fun recover(slot: Slot) {
+        if (!recovering.add(slot.id)) return
+        val p = slot.player
+        val pos = p.currentPosition
+        runCatching {
+            Repo.forget(slot.info?.url ?: return@runCatching)
+            val i = Repo.stream(slot.info!!.url)
+            slot.info = i
+            val (src, h) = Sources.build(i, slot.cap)
+            slot.quality = h
+            slot.error = null
+            p.setMediaSource(src, pos)
+            p.prepare()
+            if (activeId == slot.id) p.play()
+        }
+    }
+
     private fun release(s: Slot) {
         s.job?.cancel()
+        s.stallJob?.cancel()
+        recovering.remove(s.id)
         slots.remove(s.id)
         s.player.removeListener(s.listener)
+        s.watchdog?.let { s.player.removeListener(it) }
         s.player.stop()
         s.player.clearMediaItems()
         if (spare.size < 2) spare.addLast(s.player) else s.player.release()

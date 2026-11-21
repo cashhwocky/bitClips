@@ -89,6 +89,9 @@ object Repo {
 
     private val streamCache = LruCache<String, StreamInfo>(40)
 
+    /** Drop a cached video so the next [stream] call fetches fresh stream links. */
+    fun forget(url: String) { streamCache.remove(videoId(url) ?: url) }
+
     suspend fun stream(url: String): StreamInfo {
         val key = videoId(url) ?: url
         streamCache.get(key)?.let { return it }

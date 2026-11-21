@@ -270,14 +270,24 @@ private fun HeartBurst(h: Heart, onDone: () -> Unit) {
 private val shadowText = Shadow(Color.Black.copy(alpha = 0.55f), Offset(0f, 2f), 6f)
 private fun overlay(size: Float, weight: FontWeight = FontWeight.Normal) = body(size, Color.White, weight).merge(TextStyle(shadow = shadowText))
 
-/** A rail action: icon with a soft shadow and a count underneath, the way TikTok lays them out. */
+/**
+ * A rail action: the icon sits in a soft, see-through Bloom cookie (accent-filled when it's on) with the
+ * count underneath. No elevation shadows: those drew a pale box/line under transparent icons.
+ */
 @Composable
-private fun RailAction(icon: ImageVector, label: String?, tint: Color = Color.White, pop: Boolean = false, onClick: () -> Unit) {
+private fun RailAction(icon: ImageVector, label: String?, on: Boolean = false, onClick: () -> Unit) {
     val view = LocalView.current
-    val s by animateFloatAsState(if (pop) 1f else 0.94f, spring(dampingRatio = 0.35f, stiffness = 500f), label = "pop")
+    val s by animateFloatAsState(if (on) 1.08f else 1f, spring(dampingRatio = 0.35f, stiffness = 500f), label = "pop")
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.squish(scale = 0.85f) { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); onClick() }) {
-        Icon(icon, label, tint = tint, modifier = Modifier.size(38.dp).graphicsLayer { scaleX = s; scaleY = s; shadowElevation = 6f })
-        if (label != null) Text(label, style = overlay(12.5f, FontWeight.SemiBold))
+        Box(
+            Modifier.size(50.dp).graphicsLayer { scaleX = s; scaleY = s }.clip(Shapes.Sunny)
+                .background(if (on) Bit.accent else Color.Black.copy(alpha = 0.32f)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, label, tint = if (on) Bit.onAccent else Color.White, modifier = Modifier.size(26.dp)) }
+        if (label != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(label, style = overlay(12.5f, FontWeight.SemiBold))
+        }
     }
 }
 
@@ -338,7 +348,7 @@ private fun ClipPage(v: VideoRef, active: Boolean, topInset: Dp) {
         val commentLabel = comments?.total?.let { compact(it.toLong()) } ?: comments?.let { if (it.next != null) "${it.items.size}+" else "${it.items.size}" } ?: "…"
         Column(
             Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = bottom + 18.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             val ch = details.channelUrl?.let { ChannelRef(it, details.channel, details.avatar) }
             Box(Modifier.size(56.dp, 66.dp)) {
@@ -353,10 +363,10 @@ private fun ClipPage(v: VideoRef, active: Boolean, topInset: Dp) {
                     ) { Icon(if (subbed) Icons.Rounded.Check else Icons.Rounded.Add, if (subbed) "Following" else "Follow", tint = if (subbed) Bit.accent else Bit.onAccent, modifier = Modifier.size(16.dp)) }
                 }
             }
-            RailAction(Icons.Rounded.Favorite, likes?.let { compact(it + if (liked) 1 else 0) } ?: "Like", if (liked) Bit.accent else Color.White, liked) { Sync.like(details) }
+            RailAction(Icons.Rounded.Favorite, likes?.let { compact(it + if (liked) 1 else 0) } ?: "Like", liked) { Sync.like(details) }
             RailAction(Icons.AutoMirrored.Rounded.Comment, commentLabel) { Sheets.comments = details }
-            RailAction(if (saved) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder, "Save", if (saved) Bit.accent else Color.White, saved) { Sync.watchLater(details) }
-            RailAction(Icons.Rounded.Reply, "Share", Color.White) { share(context, details) }
+            RailAction(if (saved) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder, "Save", saved) { Sync.watchLater(details) }
+            RailAction(Icons.Rounded.Reply, "Share") { share(context, details) }
             // The spinning record, Bloom style: a scalloped cookie with the creator inside.
             val spin = rememberInfiniteTransition(label = "disc")
             val r by spin.animateFloat(0f, 360f, infiniteRepeatable(tween(5200, easing = LinearEasing)), label = "r")
